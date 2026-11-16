@@ -1,0 +1,31 @@
+TwinForge
+Copyright (c) 2026 Zheer Khalid (https://zheer.dev)
+Licensed under the MIT License (see LICENSE).
+
+Third-party material
+--------------------
+
+Rust crates
+  TwinForge is built with open-source Rust crates, among them:
+
+    blake3        content fingerprints          CC0-1.0 OR Apache-2.0
+    xxhash-rust   XXH3 fingerprints             BSL-1.0
+    image         picture decoding              MIT OR Apache-2.0
+    lofty         audio tag reading             MIT OR Apache-2.0
+    eframe / egui the window                    MIT OR Apache-2.0
+    rfd           system file dialogs           MIT
+    serde, serde_json                           MIT OR Apache-2.0
+    windows       Windows API bindings          MIT OR Apache-2.0
+    tiny-skia, embed-resource (build only)      BSD-3-Clause, MIT OR Apache-2.0 OR Zlib
+
+  Each crate, and the crates they depend on, is used under its own licence;
+  see Cargo.lock for the exact versions and each crate for its terms.
+
+  The perceptual picture hashes, the fuzzy text matching, the selection rules
+  and the guarded action engine are original code written for TwinForge.
+
+Fonts
+  TwinForge loads the Segoe UI and Segoe MDL2 Assets fonts that are installed
+  with Windows at run time. They are not distributed with TwinForge.
+
+TwinForge works entirely on this PC. It contacts no online service.

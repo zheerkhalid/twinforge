@@ -1,0 +1,60 @@
+[package]
+name = "twinforge"
+version = "1.0.0"
+edition = "2021"
+description = "A safe, fast finder for duplicate files, similar pictures and other clutter on Windows"
+authors = ["Zheer Khalid (https://zheer.dev)"]
+homepage = "https://zheer.dev"
+repository = "https://github.com/zheerkhalid/twinforge"
+license = "MIT"
+
+[lib]
+name = "twinforge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "TwinForge"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+eframe = { version = "0.31.1", default-features = false, features = ["glow", "default_fonts"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp", "tiff", "ico"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Native open/save dialogs (uses the system dialogs, no extra runtime).
+rfd = { version = "0.15", default-features = false }
+# Content hashes for the exact-duplicate stages.
+blake3 = "1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+# Audio tag reading (ID3, Vorbis comments, MP4 atoms, ...).
+lofty = "0.22"
+
+[dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[build-dependencies]
+tiny-skia = "0.11"
+embed-resource = "2.5"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
