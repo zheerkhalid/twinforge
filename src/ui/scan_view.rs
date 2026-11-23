@@ -366,7 +366,7 @@ impl App {
         });
     }
 
-    fn add_location(&mut self, path: PathBuf) {
+    pub(super) fn add_location(&mut self, path: PathBuf) {
         let cfg = &mut self.settings.scan;
         let known = cfg
             .include
@@ -474,7 +474,7 @@ impl App {
                         &mut cfg.match_rotated,
                         "Also match rotated and mirrored copies",
                     );
-                    note(ui, "Finds resized, recompressed and lightly edited copies in JPEG, PNG, GIF, BMP, WebP and TIFF files.");
+                    note(ui, "Finds resized, recompressed and lightly edited copies in JPEG, PNG, GIF, BMP, WebP and TIFF files, and in HEIC, AVIF and camera RAW files when Windows has the codec for them.");
                 }
                 Finder::SimilarMusic => {
                     ui.label("These tags must agree");
@@ -670,12 +670,7 @@ impl App {
                     ui.label(RichText::new(eta).color(p.muted));
                     ui.add_space(6.0);
                     let (rect, _) = ui.allocate_exact_size(vec2(560.0, 18.0), Sense::hover());
-                    let galley = widgets::elided(ui, &snap.current, regular(12.5), p.faint, 560.0);
-                    ui.painter().galley(
-                        egui::pos2(rect.center().x - galley.size().x / 2.0, rect.top()),
-                        galley,
-                        p.faint,
-                    );
+                    widgets::text_in_center(ui, rect, &snap.current, regular(12.5), p.faint);
                 });
                 ui.add_space(6.0);
             });

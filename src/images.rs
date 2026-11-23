@@ -24,27 +24,65 @@ pub const EXTENSIONS: [&str; 10] = [
 const MAX_ERRORS: usize = 200;
 
 pub fn is_picture(path: &Path) -> bool {
-    EXTENSIONS.contains(&extension(path).as_str())
+    EXTENSIONS.contains(&extension(path).as_str()) || crate::wic::handles(path)
+}
+
+/// How large the pictures decoded by Windows are when they are fingerprinted.
+const WINDOWS_HASH_SIDE: u32 = 512;
+
+/// Decodes a picture for fingerprinting and reports its real size in pixels.
+/// HEIC, AVIF and camera RAW files go to the Windows codecs (see
+/// [`crate::wic`]); a picture in a variant the built-in decoders do not
+/// support gets a second chance there as well. A damaged file does not:
+/// Windows would hand back whatever part of it can still be read, and half a
+/// picture must never be matched as if it were whole.
+pub fn decode_sized(path: &Path) -> Result<(image::DynamicImage, u32, u32), String> {
+    let by_windows = |path: &Path| {
+        crate::wic::decode(path, WINDOWS_HASH_SIDE).map(|d| {
+            (
+                image::DynamicImage::ImageRgba8(d.image),
+                d.full_width,
+                d.full_height,
+            )
+        })
+    };
+    if crate::wic::handles(path) {
+        return by_windows(path);
+    }
+    match decode_builtin(path) {
+        Ok(img) => {
+            let (w, h) = (img.width(), img.height());
+            Ok((img, w, h))
+        }
+        Err(e) if unsupported(&e) => by_windows(path).map_err(|_| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// The picture is fine but uses something the built-in decoders cannot do.
+fn unsupported(e: &image::ImageError) -> bool {
+    matches!(e, image::ImageError::Unsupported(_))
 }
 
 /// Decodes a picture with limits that keep a hostile file from eating all
 /// memory, and turns it upright according to its EXIF orientation.
 pub fn decode(path: &Path) -> Result<image::DynamicImage, String> {
-    let mut reader = image::ImageReader::open(path)
-        .map_err(|e| e.to_string())?
-        .with_guessed_format()
-        .map_err(|e| e.to_string())?;
+    decode_builtin(path).map_err(|e| e.to_string())
+}
+
+fn decode_builtin(path: &Path) -> Result<image::DynamicImage, image::ImageError> {
+    let mut reader = image::ImageReader::open(path)?.with_guessed_format()?;
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(1024 * 1024 * 1024);
     limits.max_image_width = Some(40_000);
     limits.max_image_height = Some(40_000);
     reader.limits(limits);
-    let mut decoder = reader.into_decoder().map_err(|e| e.to_string())?;
+    let mut decoder = reader.into_decoder()?;
     use image::ImageDecoder;
     let orientation = decoder
         .orientation()
         .unwrap_or(image::metadata::Orientation::NoTransforms);
-    let mut img = image::DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
+    let mut img = image::DynamicImage::from_decoder(decoder)?;
     img.apply_orientation(orientation);
     Ok(img)
 }
@@ -52,7 +90,24 @@ pub fn decode(path: &Path) -> Result<image::DynamicImage, String> {
 /// Decodes a picture and scales it to fit `max_side` x `max_side`.
 pub fn load_thumbnail(path: &Path, max_side: u32) -> Option<Thumb> {
     let max_side = max_side.clamp(8, 4096);
-    let img = std::panic::catch_unwind(|| decode(path)).ok()?.ok()?;
+    let by_windows = |path: &Path| {
+        let d = crate::wic::decode(path, max_side).ok()?;
+        Some(Thumb {
+            width: d.image.width(),
+            height: d.image.height(),
+            rgba: d.image.into_raw(),
+            full_width: d.full_width,
+            full_height: d.full_height,
+        })
+    };
+    if crate::wic::handles(path) {
+        return by_windows(path);
+    }
+    let img = match std::panic::catch_unwind(|| decode_builtin(path)).ok()? {
+        Ok(img) => img,
+        Err(e) if unsupported(&e) => return by_windows(path),
+        Err(_) => return None,
+    };
     let (full_width, full_height) = (img.width(), img.height());
     if full_width == 0 || full_height == 0 {
         return None;
@@ -351,9 +406,8 @@ pub fn scan_with(cfg: &ScanConfig, guard: &Guard, progress: &Progress) -> ScanRe
                         // A decoder bug must not take the whole scan down.
                         let path = file.path.clone();
                         std::panic::catch_unwind(move || {
-                            decode(&path).map(|img| {
-                                (img.width(), img.height(), Signature::of_image(&img, kind))
-                            })
+                            decode_sized(&path)
+                                .map(|(img, w, h)| (w, h, Signature::of_image(&img, kind)))
                         })
                         .unwrap_or_else(|_| Err("the picture could not be decoded".into()))
                         .inspect(|(w, h, sig)| {

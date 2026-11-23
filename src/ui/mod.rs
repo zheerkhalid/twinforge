@@ -1,5 +1,6 @@
 //! The egui user interface.
 mod app;
+mod bidi;
 mod pages;
 pub mod results_view;
 mod scan_view;

@@ -322,6 +322,13 @@ pub fn elided(
 
 /// Paints one elided line, vertically centred in `rect`. Returns whether it was cut.
 pub fn text_in(ui: &Ui, rect: Rect, text: &str, font: FontId, color: Color32) -> bool {
+    // Kurdish, Arabic, Persian and Hebrew names are drawn by Windows itself.
+    if super::bidi::needs_native(text) {
+        let bold = font.family != egui::FontFamily::Proportional;
+        if let Some(cut) = super::bidi::paint(ui, rect, text, font.size, bold, color, false) {
+            return cut;
+        }
+    }
     let galley = elided(ui, text, font, color, rect.width());
     let cut = galley.elided;
     ui.painter().galley(
@@ -334,6 +341,12 @@ pub fn text_in(ui: &Ui, rect: Rect, text: &str, font: FontId, color: Color32) ->
 
 /// Like [`text_in`], right-aligned.
 pub fn text_in_right(ui: &Ui, rect: Rect, text: &str, font: FontId, color: Color32) {
+    if super::bidi::needs_native(text) {
+        let bold = font.family != egui::FontFamily::Proportional;
+        if super::bidi::paint(ui, rect, text, font.size, bold, color, true).is_some() {
+            return;
+        }
+    }
     let galley = elided(ui, text, font, color, rect.width());
     ui.painter().galley(
         pos2(
@@ -343,6 +356,38 @@ pub fn text_in_right(ui: &Ui, rect: Rect, text: &str, font: FontId, color: Color
         galley,
         color,
     );
+}
+
+/// Like [`text_in`], centred. Used for the file being scanned.
+pub fn text_in_center(ui: &Ui, rect: Rect, text: &str, font: FontId, color: Color32) {
+    if super::bidi::needs_native(text) {
+        if let Some(size) = super::bidi::measure(ui, text, font.size, false) {
+            let width = size.x.min(rect.width());
+            let centred = Rect::from_center_size(rect.center(), vec2(width, rect.height()));
+            if super::bidi::paint(ui, centred, text, font.size, false, color, false).is_some() {
+                return;
+            }
+        }
+    }
+    let galley = elided(ui, text, font, color, rect.width());
+    ui.painter().galley(
+        pos2(
+            rect.center().x - galley.size().x / 2.0,
+            rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        color,
+    );
+}
+
+/// A file name or folder in a panel: wraps like a label, except right-to-left
+/// text, which is drawn by Windows on one line (hover shows all of it).
+pub fn path_label(ui: &mut Ui, text: &str, size: f32, bold: bool, color: Color32) -> Response {
+    if super::bidi::needs_native(text) {
+        return super::bidi::label(ui, text, size, bold, color);
+    }
+    let font = if bold { semibold(size) } else { regular(size) };
+    ui.add(egui::Label::new(RichText::new(text).font(font).color(color)).wrap())
 }
 
 /// A designed empty / error state: icon, title, explanation.

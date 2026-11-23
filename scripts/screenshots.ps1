@@ -4,8 +4,8 @@ param([string]$Exe = "")
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $Exe) {
-    $Exe = @("$root\target\release\TwinForge.exe", "$root\dist\TwinForge.exe", "$root\target\debug\TwinForge.exe") |
-        Where-Object { Test-Path $_ } | Select-Object -First 1
+    $Exe = @($(if ($env:CARGO_TARGET_DIR) { "$env:CARGO_TARGET_DIR\release\TwinForge.exe" }), "$root\target\release\TwinForge.exe", "$root\dist\TwinForge.exe", "$root\target\debug\TwinForge.exe") |
+        Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
 }
 if (-not $Exe) { throw "Build TwinForge first (cargo build --release)." }
 $out = Join-Path $root "docs\screenshots"
@@ -15,6 +15,7 @@ New-Item -ItemType Directory -Force $out | Out-Null
 $shots = @(
     @("duplicates",        "duplicates",     "selected", $false),
     @("similar-pictures",  "pictures",       "compare",  $false),
+    @("compare-large",     "pictures",       "compare-large", $false),
     @("similar-music",     "music",          "compare",  $false),
     @("same-name",         "names",          "selected", $false),
     @("empty-files",       "empty-files",    "selected", $false),

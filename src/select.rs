@@ -25,6 +25,9 @@ pub enum Rule {
     KeepBestAudio,
     KeepShortestPath,
     KeepLongestPath,
+    /// Keep the file whose name does not look like a copy ("photo (1).jpg",
+    /// "report - Copy.docx", "Copy of budget.xlsx").
+    KeepOriginalName,
     /// Keep the file in the folder that comes first in this list.
     KeepByFolderPriority(Vec<PathBuf>),
 }
@@ -40,6 +43,7 @@ impl Rule {
             Rule::KeepBestAudio => "Keep the best sound quality",
             Rule::KeepShortestPath => "Keep the shortest path",
             Rule::KeepLongestPath => "Keep the longest path",
+            Rule::KeepOriginalName => "Keep the original name",
             Rule::KeepByFolderPriority(_) => "Keep by folder order",
         }
     }
@@ -49,6 +53,52 @@ fn bitrate(i: &Item) -> u32 {
     match i.detail {
         crate::model::Detail::Audio { bitrate_kbps, .. } => bitrate_kbps,
         _ => 0,
+    }
+}
+
+/// How much a file name looks like a copy made by Windows, a browser or a
+/// sync tool: 0 for a plain name, more for every copy mark found.
+/// `photo.jpg` = 0, `photo (1).jpg` = 1, `photo - Copy (2).jpg` = 2.
+pub fn copy_marks(path: &Path) -> u32 {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let mut rest = stem.trim();
+    let mut marks = 0;
+    loop {
+        let before = rest;
+        // "name (2)", "name(2)"
+        if let Some(open) = rest.rfind('(') {
+            if let Some(number) = rest[open + 1..].strip_suffix(')') {
+                if !number.is_empty()
+                    && number.len() <= 2
+                    && number.chars().all(|c| c.is_ascii_digit())
+                    && !rest[..open].trim_end().is_empty()
+                {
+                    rest = rest[..open].trim_end();
+                    marks += 1;
+                }
+            }
+        }
+        // "name - Copy", "name copy", "name_copy", "name-copy"
+        if let Some(head) = rest.strip_suffix("copy") {
+            let trimmed = head.trim_end_matches([' ', '-', '_']);
+            if trimmed.len() < head.len() && !trimmed.is_empty() {
+                rest = trimmed;
+                marks += 1;
+            }
+        }
+        // "Copy of name"
+        if let Some(tail) = rest.strip_prefix("copy of ") {
+            if !tail.trim().is_empty() {
+                rest = tail.trim_start();
+                marks += 1;
+            }
+        }
+        if rest == before {
+            return marks;
+        }
     }
 }
 
@@ -72,6 +122,10 @@ fn prefer(a: &Item, b: &Item, rule: &Rule) -> Ordering {
             .then(b.file.size.cmp(&a.file.size)),
         Rule::KeepShortestPath => path_len(a).cmp(&path_len(b)),
         Rule::KeepLongestPath => path_len(b).cmp(&path_len(a)),
+        // Fewer copy marks first; among equals the file that was there first.
+        Rule::KeepOriginalName => copy_marks(&a.file.path)
+            .cmp(&copy_marks(&b.file.path))
+            .then(a.file.modified.cmp(&b.file.modified)),
         Rule::KeepByFolderPriority(folders) => {
             let rank = |i: &Item| {
                 folders
@@ -226,6 +280,38 @@ pub fn select_in_folder(groups: &mut [Group], folder: &Path) -> usize {
         }
     }
     ticked
+}
+
+/// In every group that has a copy inside `folder`, keeps the copies there and
+/// ticks all the others. Groups without a file in the folder, and groups that
+/// lie in it completely, are left as they are. Returns how many groups changed.
+pub fn keep_in_folder(groups: &mut [Group], folder: &Path) -> usize {
+    let mut changed = 0;
+    for group in groups.iter_mut() {
+        if group.items.len() < 2 {
+            continue;
+        }
+        let inside: Vec<bool> = group
+            .items
+            .iter()
+            .map(|i| within(&i.file.path, folder))
+            .collect();
+        let any_in = inside.iter().any(|x| *x);
+        let any_out = group
+            .items
+            .iter()
+            .zip(&inside)
+            .any(|(i, within)| !within && !i.reference);
+        if !any_in || !any_out {
+            continue;
+        }
+        for (item, within) in group.items.iter_mut().zip(&inside) {
+            item.selected = !within && !item.reference;
+        }
+        changed += 1;
+    }
+    enforce(groups);
+    changed
 }
 
 /// Does the invariant hold for these groups?
@@ -535,5 +621,88 @@ mod tests {
                 assert_eq!(kept, refs.max(1), "round {round}");
             }
         }
+    }
+
+    #[test]
+    fn copy_marks_are_recognised() {
+        for (name, marks) in [
+            ("photo.jpg", 0),
+            ("photo (1).jpg", 1),
+            ("photo(12).jpg", 1),
+            ("report - Copy.docx", 1),
+            ("report - Copy (2).docx", 2),
+            ("report copy.docx", 1),
+            ("report_copy.docx", 1),
+            ("Copy of budget.xlsx", 1),
+            ("Copy of budget (3).xlsx", 2),
+            // Not copy marks: part of the real name.
+            ("copy.txt", 0),
+            ("photocopy.pdf", 0),
+            ("Symphony No. 5 (1808).flac", 0),
+            ("(1).jpg", 0),
+            ("Holiday (Lisbon).jpg", 0),
+            ("\u{648}\u{6ce}\u{646}\u{6d5} (1).jpg", 1),
+        ] {
+            assert_eq!(copy_marks(Path::new(name)), marks, "{name}");
+        }
+    }
+
+    #[test]
+    fn original_name_rule_prefers_the_plain_name() {
+        let mut groups = vec![Group::new(
+            vec![
+                item("X:\\Downloads\\Harbour walk (1).mp4", 10, 100),
+                item("X:\\Videos\\Harbour walk.mp4", 10, 300),
+                item("X:\\Backup\\Harbour walk - Copy.mp4", 10, 200),
+            ],
+            "",
+        )];
+        apply(&mut groups, &Rule::KeepOriginalName);
+        assert_eq!(selected(&groups[0]), [true, false, true]);
+        // No name looks like a copy: the oldest file is the original.
+        let mut plain = sample();
+        apply(&mut plain, &Rule::KeepOriginalName);
+        assert_eq!(selected(&plain[0]), [true, false, true]);
+        assert!(is_valid(&plain));
+    }
+
+    #[test]
+    fn keep_in_folder_keeps_the_copies_there() {
+        let mut groups = vec![
+            Group::new(
+                vec![
+                    item("X:\\Library\\a.bin", 1, 1),
+                    item("X:\\Downloads\\a.bin", 1, 1),
+                    item("X:\\Temp\\a.bin", 1, 1),
+                ],
+                "",
+            ),
+            // Not in the folder at all: untouched.
+            Group::new(
+                vec![
+                    item("X:\\Downloads\\b.bin", 1, 1),
+                    item("X:\\Temp\\b.bin", 1, 1),
+                ],
+                "",
+            ),
+            // Completely in the folder: untouched.
+            Group::new(
+                vec![
+                    item("X:\\Library\\c.bin", 1, 1),
+                    item("X:\\Library\\sub\\c.bin", 1, 1),
+                ],
+                "",
+            ),
+        ];
+        groups[1].items[1].selected = true;
+        assert_eq!(keep_in_folder(&mut groups, Path::new("X:\\Library")), 1);
+        assert_eq!(selected(&groups[0]), [false, true, true]);
+        assert_eq!(selected(&groups[1]), [false, true]);
+        assert_eq!(selected(&groups[2]), [false, false]);
+        assert!(is_valid(&groups));
+        // A reference copy outside the folder is never ticked.
+        groups[0].items[2].reference = true;
+        keep_in_folder(&mut groups, Path::new("X:\\Library"));
+        assert_eq!(selected(&groups[0]), [false, true, false]);
     }
 }

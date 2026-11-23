@@ -27,6 +27,28 @@ fn fold(c: char) -> &'static str {
     }
 }
 
+/// Tidies letters of the Arabic script (Arabic, Kurdish, Persian, Urdu) so
+/// that the same word typed on different keyboards compares equal.
+/// `None`: not such a character. `Some(None)`: a mark that is dropped.
+fn fold_arabic(c: char) -> Option<Option<char>> {
+    Some(match c {
+        // Vowel marks, the stretching line and invisible joiners.
+        '\u{064B}'..='\u{065F}' | '\u{0670}' | '\u{0640}' | '\u{200C}'..='\u{200F}' => None,
+        // The three spellings of "ya" and the two of "kaf".
+        '\u{064A}' | '\u{0649}' | '\u{06CC}' => Some('\u{06CC}'),
+        '\u{0643}' | '\u{06A9}' => Some('\u{06A9}'),
+        // "ta marbuta", the Kurdish "ae" and the two-eyed "he" are all typed for "he".
+        '\u{0629}' | '\u{06D5}' | '\u{06BE}' | '\u{0647}' => Some('\u{0647}'),
+        // "alef" with a hamza or madda.
+        '\u{0623}' | '\u{0625}' | '\u{0622}' | '\u{0671}' => Some('\u{0627}'),
+        '\u{0624}' => Some('\u{0648}'),
+        // Arabic and Persian digits.
+        '\u{0660}'..='\u{0669}' => char::from_digit(c as u32 - 0x0660, 10),
+        '\u{06F0}'..='\u{06F9}' => char::from_digit(c as u32 - 0x06F0, 10),
+        _ => return None,
+    })
+}
+
 /// Removes everything inside (...), [...] and {...}.
 fn strip_brackets(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -56,6 +78,10 @@ pub fn normalize(text: &str) -> String {
     };
     let mut plain = String::with_capacity(source.len());
     for c in source.chars() {
+        if let Some(arabic) = fold_arabic(c) {
+            plain.extend(arabic);
+            continue;
+        }
         let folded = fold(c);
         if !folded.is_empty() {
             plain.push_str(folded);
@@ -218,5 +244,37 @@ mod tests {
         assert_eq!(d("same", "same"), 0);
         // The early exit reports "more than the limit".
         assert_eq!(edit_distance(&['a'; 10], &['b'; 10], 3), 4);
+    }
+
+    #[test]
+    fn arabic_script_spellings_compare_equal() {
+        // Kurdish "Kurdistan" with an Arabic kaf and with the Kurdish/Persian one.
+        assert_eq!(
+            normalize("\u{643}\u{648}\u{631}\u{62f}\u{633}\u{62a}\u{627}\u{646}"),
+            normalize("\u{6a9}\u{648}\u{631}\u{62f}\u{633}\u{62a}\u{627}\u{646}")
+        );
+        // Arabic "ya" and Persian/Kurdish "ya"; vowel marks and the stretching line are ignored.
+        assert_eq!(
+            normalize("\u{62d}\u{64e}\u{628}\u{640}\u{64a}\u{628}\u{64a}"),
+            normalize("\u{62d}\u{628}\u{6cc}\u{628}\u{6cc}")
+        );
+        // The marks do not split a word in two.
+        assert!(!normalize("\u{62d}\u{64e}\u{628}\u{64a}\u{628}\u{64a}").contains(' '));
+        // Arabic digits are digits: track 2 is not track 3.
+        assert_eq!(normalize("\u{661}\u{662}"), "12");
+        assert_eq!(
+            similarity_normalized(
+                &normalize("\u{628}\u{634}\u{6cc} \u{662}"),
+                &normalize("\u{628}\u{634}\u{6cc} \u{663}")
+            ),
+            0
+        );
+        // Different words stay different.
+        assert!(
+            similarity_normalized(
+                &normalize("\u{6af}\u{6c6}\u{631}\u{627}\u{646}\u{6cc}"),
+                &normalize("\u{62a}\u{642}\u{631}\u{64a}\u{631}")
+            ) < 60
+        );
     }
 }

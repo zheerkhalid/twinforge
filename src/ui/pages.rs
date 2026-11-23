@@ -566,6 +566,40 @@ impl App {
                             }
                         },
                     );
+                    let hidden = if self.demo { 3 } else { self.ignore.len() };
+                    setting_row(
+                        ui,
+                        "Hidden groups",
+                        &match hidden {
+                            0 => "Groups you mark as \"not a match\" are left out of later scans.".to_string(),
+                            1 => "1 group you marked as \"not a match\" is left out of scans.".to_string(),
+                            n => format!(
+                                "{n} groups you marked as \"not a match\" are left out of scans."
+                            ),
+                        },
+                        |ui| {
+                            if widgets::ghost_button_enabled(ui, "Show them again", hidden > 0)
+                                .clicked()
+                            {
+                                if self.demo {
+                                    self.toast("Demo mode: nothing is changed on this PC.", false);
+                                } else {
+                                    let before = self.ignore.clone();
+                                    self.ignore.clear();
+                                    match self.ignore.save(&self.app_dir) {
+                                        Ok(()) => self.toast(
+                                            "Hidden groups will be listed again at the next scan.",
+                                            false,
+                                        ),
+                                        Err(e) => {
+                                            self.ignore = before;
+                                            self.toast(e, true);
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                    );
                 });
                 ui.add_space(4.0);
                 widgets::card(ui, |ui| {
@@ -1076,6 +1110,8 @@ impl App {
                     ("Ctrl+A", "Select all but one file in every group"),
                     ("Ctrl+I", "Invert the selection"),
                     ("Ctrl+D", "Clear the selection"),
+                    ("Up / Down", "Move through the files"),
+                    ("Left / Right", "Close or open the highlighted group"),
                     ("Space", "Tick or untick the highlighted file"),
                     ("Enter", "Open the highlighted file"),
                     ("Delete", "Run the main action on the selection"),

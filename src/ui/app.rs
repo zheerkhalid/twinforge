@@ -7,6 +7,7 @@ use super::theme::{self, pal, pal_ctx, regular, semibold, Icon};
 use super::widgets;
 use crate::actions::{self, Method, Plan, Report};
 use crate::history::{self, Entry};
+use crate::ignore::IgnoreList;
 use crate::model::{ActionKind, ExportFormat, Finder, Progress, ScanResult};
 use crate::settings::Settings;
 use crate::sys::{self, Guard};
@@ -115,6 +116,8 @@ pub struct App {
     pub(super) report: Option<Report>,
     pub(super) history: Vec<Entry>,
     pub(super) history_open: Option<usize>,
+    /// Groups the user hid as "not a match"; left out of every later scan.
+    pub(super) ignore: IgnoreList,
 
     pub(super) search: String,
     focus_search: bool,
@@ -127,6 +130,31 @@ pub struct App {
     pub(super) logo: Option<TextureHandle>,
     shot: Option<Shot>,
     auto: Option<Autopilot>,
+}
+
+/// The folders a drop stands for: folders as they are, files by the folder
+/// they lie in, each one once.
+pub fn dropped_folders(dropped: &[PathBuf]) -> Vec<PathBuf> {
+    let mut folders: Vec<PathBuf> = Vec::new();
+    for path in dropped {
+        let folder = if path.is_dir() {
+            Some(path.clone())
+        } else if path.is_file() {
+            path.parent().map(|p| p.to_path_buf())
+        } else {
+            None
+        };
+        if let Some(folder) = folder {
+            let key = crate::util::norm_path(&folder.to_string_lossy());
+            if !folders
+                .iter()
+                .any(|f| crate::util::norm_path(&f.to_string_lossy()) == key)
+            {
+                folders.push(folder);
+            }
+        }
+    }
+    folders
 }
 
 /// Starts the window.
@@ -190,6 +218,11 @@ impl App {
                 super::pages::demo_history()
             } else {
                 history::load_all(&app_dir)
+            },
+            ignore: if options.demo {
+                IgnoreList::default()
+            } else {
+                IgnoreList::load(&app_dir)
             },
             app_dir,
             demo: options.demo,
@@ -370,12 +403,13 @@ impl App {
     fn drain_messages(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Msg::ScanDone(generation, finder, result) => {
+                Msg::ScanDone(generation, finder, mut result) => {
                     if self.running.as_ref().map(|r| r.generation) != Some(generation) {
                         continue;
                     }
                     self.running = None;
-                    let text = if result.cancelled {
+                    let hidden = self.ignore.apply(&mut result);
+                    let mut text = if result.cancelled {
                         "Scan stopped. The list shows what was found so far.".to_string()
                     } else if result.groups.is_empty() {
                         format!("{}: nothing found.", finder.title())
@@ -387,6 +421,17 @@ impl App {
                             fmt_size(result.wasted_bytes())
                         )
                     };
+                    if hidden > 0 {
+                        text.push_str(&format!(
+                            " {} hidden {} left out.",
+                            fmt_count(hidden as u64),
+                            if hidden == 1 {
+                                "group was"
+                            } else {
+                                "groups were"
+                            }
+                        ));
+                    }
                     self.toast(text, false);
                     self.results.insert(finder, ResultsState::new(*result));
                 }
@@ -418,6 +463,22 @@ impl App {
             ResultsRequest::Rescan => self.start_scan(ctx, finder),
             ResultsRequest::Export(format) => self.export(finder, format),
             ResultsRequest::Run(kind) => self.prepare_action(finder, kind),
+            ResultsRequest::Ignore(paths) => {
+                if self.demo {
+                    self.toast("Group hidden. Demo mode: nothing is saved.", false);
+                    return;
+                }
+                if self.ignore.add(finder, &paths) {
+                    if let Err(e) = self.ignore.save(&self.app_dir) {
+                        self.toast(e, true);
+                        return;
+                    }
+                }
+                self.toast(
+                    "Group hidden. It stays hidden in later scans; Settings can bring it back.",
+                    false,
+                );
+            }
         }
     }
 
@@ -507,8 +568,65 @@ impl App {
     // Keyboard and screenshots
     // ----------------------------------------------------------------------------------
 
+    /// Folders dragged onto the window join the list of places to scan. A
+    /// dropped file stands for the folder it lies in.
+    fn handle_drops(&mut self, ctx: &egui::Context) {
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .collect()
+        });
+        if dropped.is_empty() {
+            return;
+        }
+        if self.demo {
+            self.toast("Demo mode: the folders stay as they are.", false);
+            return;
+        }
+        if self.job.is_some() || self.running.is_some() {
+            self.toast(
+                "Wait until the current work is finished, then drop again.",
+                true,
+            );
+            return;
+        }
+        let folders = dropped_folders(&dropped);
+        let before = self.settings.scan.include.len();
+        for folder in &folders {
+            self.add_location(folder.clone());
+        }
+        let added = self.settings.scan.include.len() - before;
+        let showing_results = matches!(self.tab, Tab::Finder(f) if self.results.contains_key(&f));
+        self.toast(
+            match (added, showing_results) {
+                (0, _) if folders.is_empty() => "Drop folders here to scan them.".to_string(),
+                (0, _) => "Already in the list of folders to scan.".to_string(),
+                (1, false) => "1 folder added.".to_string(),
+                (n, false) => format!("{n} folders added."),
+                (1, true) => "1 folder added. Scan again to include it.".to_string(),
+                (n, true) => format!("{n} folders added. Scan again to include them."),
+            },
+            false,
+        );
+        self.persist_settings();
+    }
+
+    /// The large compare window of the current finder is open.
+    fn overlay_open(&self) -> bool {
+        match self.tab {
+            Tab::Finder(finder) => self
+                .results
+                .get(&finder)
+                .is_some_and(|state| state.overlay_open()),
+            _ => false,
+        }
+    }
+
     fn dialog_open(&self) -> bool {
-        self.confirm.is_some()
+        self.overlay_open()
+            || self.confirm.is_some()
             || self.report.is_some()
             || self.job.is_some()
             || self.about_open
@@ -550,6 +668,8 @@ impl App {
             } else if self.about_open || self.keys_open {
                 self.about_open = false;
                 self.keys_open = false;
+            } else if self.overlay_open() {
+                // the compare window closes itself
             } else if !self.search.is_empty() {
                 self.search.clear();
             }
@@ -970,6 +1090,11 @@ impl App {
             settings: &self.settings,
             demo: self.demo,
             busy: self.job.is_some() || self.running.is_some(),
+            modal: self.confirm.is_some()
+                || self.report.is_some()
+                || self.job.is_some()
+                || self.about_open
+                || self.keys_open,
             folders: &folders,
             tz_offset: self.tz_offset,
         };
@@ -1096,6 +1221,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_messages();
+        self.handle_drops(ctx);
         self.handle_keys(ctx);
         self.handle_screenshot(ctx);
         self.autopilot(ctx);
@@ -1154,5 +1280,30 @@ impl eframe::App for App {
         if self.setup.apply(&mut self.settings.scan).is_ok() {
             self.persist_settings();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_drop_becomes_a_list_of_folders() {
+        let root = std::env::temp_dir().join(format!("twinforge-drop-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (a, b) = (root.join("a"), root.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("one.txt"), b"1").unwrap();
+        std::fs::write(b.join("two.txt"), b"2").unwrap();
+        let folders = dropped_folders(&[
+            a.clone(),
+            a.join("one.txt"),        // its folder is already there
+            b.join("two.txt"),        // stands for b
+            root.join("missing.txt"), // gone: ignored
+        ]);
+        assert_eq!(folders, vec![a, b]);
+        assert!(dropped_folders(&[]).is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

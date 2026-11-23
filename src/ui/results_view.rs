@@ -33,6 +33,9 @@ pub struct ResultsCtx<'a> {
     pub demo: bool,
     /// An action is running: disable the action buttons.
     pub busy: bool,
+    /// A dialog of the application is open on top of the results: the
+    /// keyboard belongs to the dialog, not to the list behind it.
+    pub modal: bool,
     /// The scanned folders in priority order (include list, then reference list).
     pub folders: &'a [PathBuf],
     /// Seconds to add to UTC for display (`sys::local_offset_secs()`).
@@ -49,6 +52,9 @@ pub enum ResultsRequest {
     NewScan,
     /// Scan again with the same settings.
     Rescan,
+    /// The user hid a group ("not a match"): remember these paths so that the
+    /// group stays hidden in later scans. The view has already dropped it.
+    Ignore(Vec<PathBuf>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +123,7 @@ struct Thumbs {
 }
 
 const MAX_TEXTURES: usize = 400;
+const MAX_LARGE_TEXTURES: usize = 8;
 
 impl Thumbs {
     fn new() -> Thumbs {
@@ -192,6 +199,16 @@ impl Thumbs {
                     self.textures.remove(&old);
                 }
             }
+            // The pictures of the large compare window are big: only the
+            // last few pairs stay in memory.
+            let large = self.recent.iter().filter(|k| k.1 > 512).count();
+            if large > MAX_LARGE_TEXTURES {
+                if let Some(at) = self.recent.iter().position(|k| k.1 > 512) {
+                    if let Some(old) = self.recent.remove(at) {
+                        self.textures.remove(&old);
+                    }
+                }
+            }
         }
     }
 
@@ -262,6 +279,10 @@ pub struct ResultsState {
     errors_open: bool,
     folders: Vec<(PathBuf, usize)>,
     thumbs: Thumbs,
+    /// The large side-by-side compare window is open.
+    big_compare: bool,
+    /// A request raised while handling an event, handed over at the end of the frame.
+    pending: Option<ResultsRequest>,
 }
 
 enum Event {
@@ -273,6 +294,16 @@ enum Event {
     Copy(PathBuf),
     SelectFolder(PathBuf),
     KeepOnly(usize, usize),
+    /// In every group with a copy in this folder, keep the copies there.
+    KeepInFolder(PathBuf),
+    /// Tick all but the first file of one group.
+    SelectGroup(usize),
+    /// Untick one group.
+    ClearGroup(usize),
+    /// Hide one group now and in later scans.
+    IgnoreGroup(usize),
+    /// Open the large compare window.
+    Enlarge,
 }
 
 fn group_matches(result: &ScanResult, g: usize, needle: &str, show: Show) -> bool {
@@ -385,6 +416,8 @@ impl ResultsState {
             errors_open: false,
             folders: Vec::new(),
             thumbs: Thumbs::new(),
+            big_compare: false,
+            pending: None,
         };
         select::enforce(&mut state.result.groups);
         state.rebuild("");
@@ -489,7 +522,8 @@ impl ResultsState {
         };
         match pose {
             "selected" => select_some(self),
-            "compare" => {
+            "compare" | "compare-large" => {
+                self.big_compare = pose == "compare-large";
                 select_some(self);
                 let target = self.rows.iter().find_map(|r| match r {
                     Row::Item(g, i) if !grouped || *i == 1 => Some((*g, *i)),
@@ -521,6 +555,24 @@ impl ResultsState {
         } else {
             PREVIEW_W
         }
+    }
+
+    /// A window of this view is open on top of the list (the application
+    /// leaves the keyboard to it).
+    pub fn overlay_open(&self) -> bool {
+        self.big_compare
+    }
+
+    /// What the file at `(g, i)` is compared with: the copy that stays, or
+    /// simply another member of its group.
+    fn partner_of(&self, g: usize, i: usize) -> Option<usize> {
+        if !self.result.finder.is_grouped() {
+            return None;
+        }
+        let items = &self.result.groups.get(g)?.items;
+        (0..items.len())
+            .filter(|&k| k != i)
+            .min_by_key(|&k| (items[k].selected, !items[k].reference, k))
     }
 
     fn say(&mut self, text: &str) {
@@ -596,7 +648,45 @@ impl ResultsState {
                 if let Some(group) = self.result.groups.get_mut(g) {
                     select::keep_only(group, i);
                 }
+                self.dirty |= self.show != Show::All;
             }
+            Event::KeepInFolder(folder) => {
+                let n = select::keep_in_folder(&mut self.result.groups, &folder);
+                self.say(&match n {
+                    0 => "No group has copies both inside and outside that folder.".to_string(),
+                    1 => "1 group now keeps its copy in that folder.".to_string(),
+                    n => format!(
+                        "{} groups now keep their copy in that folder.",
+                        fmt_count(n as u64)
+                    ),
+                });
+                self.dirty |= self.show != Show::All;
+            }
+            Event::SelectGroup(g) => {
+                if let Some(group) = self.result.groups.get_mut(g) {
+                    select::select_all_but_first(std::slice::from_mut(group));
+                }
+                self.dirty |= self.show != Show::All;
+            }
+            Event::ClearGroup(g) => {
+                if let Some(group) = self.result.groups.get_mut(g) {
+                    select::clear(std::slice::from_mut(group));
+                }
+                self.dirty |= self.show != Show::All;
+            }
+            Event::IgnoreGroup(g) => {
+                if !self.result.finder.is_grouped() {
+                    return;
+                }
+                if let Some(group) = self.result.groups.get(g) {
+                    let paths: Vec<PathBuf> =
+                        group.items.iter().map(|i| i.file.path.clone()).collect();
+                    self.remove_paths(&paths.iter().cloned().collect());
+                    self.big_compare = false;
+                    self.pending = Some(ResultsRequest::Ignore(paths));
+                }
+            }
+            Event::Enlarge => self.big_compare = true,
         }
     }
 
@@ -628,7 +718,9 @@ impl ResultsState {
             return request;
         }
         self.toolbar(ui, cx);
-        self.keys(ui, grouped);
+        if !cx.modal {
+            self.keys(ui, grouped);
+        }
 
         egui::TopBottomPanel::bottom("results-actions")
             .exact_height(58.0)
@@ -660,6 +752,10 @@ impl ResultsState {
             .frame(Frame::new())
             .show_inside(ui, |ui| self.list(ui, cx, &mut events));
 
+        if self.big_compare {
+            self.compare_window(&ctx, cx, &mut events);
+        }
+
         for event in events {
             if let Event::Copy(path) = &event {
                 ctx.copy_text(path.to_string_lossy().into_owned());
@@ -670,7 +766,7 @@ impl ResultsState {
         if self.note.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(300));
         }
-        request
+        request.or_else(|| self.pending.take())
     }
 
     fn header(&mut self, ui: &mut Ui, request: &mut Option<ResultsRequest>) {
@@ -811,6 +907,7 @@ impl ResultsState {
                         if finder == Finder::SimilarMusic {
                             rules.push(Rule::KeepBestAudio);
                         }
+                        rules.push(Rule::KeepOriginalName);
                         rules.push(Rule::KeepShortestPath);
                         rules.push(Rule::KeepLongestPath);
                         if cx.folders.len() > 1 {
@@ -820,6 +917,9 @@ impl ResultsState {
                             let hover = match &rule {
                                 Rule::KeepByFolderPriority(_) => {
                                     "Keeps the copy in the folder that comes first in your list of folders."
+                                }
+                                Rule::KeepOriginalName => {
+                                    "Keeps the file whose name does not look like a copy, such as \"photo (1)\" or \"report - Copy\". Among equal names the oldest stays."
                                 }
                                 _ => "Selects every other file of each group.",
                             };
@@ -845,7 +945,20 @@ impl ResultsState {
                         ui.set_min_width(380.0);
                         for (folder, count) in &folders {
                             let label = format!("{}   ({count})", folder.to_string_lossy());
-                            if ui.button(label).clicked() {
+                            let (rect, resp) =
+                                ui.allocate_exact_size(vec2(380.0, 26.0), Sense::click());
+                            if resp.hovered() {
+                                ui.painter()
+                                    .rect_filled(rect, CornerRadius::same(4), p.hover);
+                            }
+                            widgets::text_in(
+                                ui,
+                                rect.shrink2(vec2(6.0, 0.0)),
+                                &label,
+                                regular(13.5),
+                                p.text,
+                            );
+                            if resp.clicked() {
                                 self.apply_event(Event::SelectFolder(folder.clone()));
                                 self.dirty = self.show != Show::All;
                                 ui.close_menu();
@@ -978,7 +1091,7 @@ impl ResultsState {
         if ctx.wants_keyboard_input() || ctx.memory(|m| m.any_popup_open()) {
             return;
         }
-        let (all, invert, clear, up, down, space, enter) = ctx.input(|i| {
+        let (all, invert, clear, up, down, space, enter, left, right) = ctx.input(|i| {
             (
                 i.modifiers.command && i.key_pressed(Key::A),
                 i.modifiers.command && i.key_pressed(Key::I),
@@ -987,8 +1100,24 @@ impl ResultsState {
                 i.key_pressed(Key::ArrowDown),
                 i.key_pressed(Key::Space),
                 i.key_pressed(Key::Enter),
+                i.key_pressed(Key::ArrowLeft),
+                i.key_pressed(Key::ArrowRight),
             )
         });
+        // The "with / without selection" filters follow the new selection.
+        if all || invert || clear {
+            self.dirty |= self.show != Show::All;
+        }
+        if grouped && (left || right) && !self.big_compare {
+            if let Some((g, _)) = self.focus {
+                if left {
+                    self.collapsed.insert(g);
+                } else {
+                    self.collapsed.remove(&g);
+                }
+                self.dirty = true;
+            }
+        }
         if all {
             select::select_all_but_first(&mut self.result.groups);
             self.say(if grouped {
@@ -1308,6 +1437,26 @@ impl ResultsState {
         if resp.clicked() {
             events.push(Event::ToggleGroup(g));
         }
+        resp.context_menu(|ui| {
+            ui.set_min_width(250.0);
+            if ui.button("Select all but the first").clicked() {
+                events.push(Event::SelectGroup(g));
+                ui.close_menu();
+            }
+            if ui.button("Clear this group").clicked() {
+                events.push(Event::ClearGroup(g));
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui
+                .button("Hide this group from now on")
+                .on_hover_text(HIDE_HINT)
+                .clicked()
+            {
+                events.push(Event::IgnoreGroup(g));
+                ui.close_menu();
+            }
+        });
     }
 
     fn item_row(
@@ -1527,6 +1676,28 @@ impl ResultsState {
                     events.push(Event::SelectFolder(folder.clone()));
                     ui.close_menu();
                 }
+                if grouped
+                    && ui
+                        .button("Keep the copies in this folder")
+                        .on_hover_text(
+                            "In every group that has a copy in this folder, that copy stays and the others are selected.",
+                        )
+                        .clicked()
+                {
+                    events.push(Event::KeepInFolder(folder.clone()));
+                    ui.close_menu();
+                }
+            }
+            if grouped {
+                ui.separator();
+                if ui
+                    .button("Hide this group from now on")
+                    .on_hover_text(HIDE_HINT)
+                    .clicked()
+                {
+                    events.push(Event::IgnoreGroup(g));
+                    ui.close_menu();
+                }
             }
         });
     }
@@ -1548,14 +1719,7 @@ impl ResultsState {
         };
         let group_items: Vec<Item> = group.items.clone();
         let grouped = self.result.finder.is_grouped();
-        // What to compare with: the copy that stays, or simply another member.
-        let partner = if grouped {
-            (0..group_items.len())
-                .filter(|&k| k != i)
-                .min_by_key(|&k| (group_items[k].selected, !group_items[k].reference, k))
-        } else {
-            None
-        };
+        let partner = self.partner_of(g, i);
         let is_pic = images::is_picture(&item.file.path);
         let mut close = false;
 
@@ -1604,10 +1768,10 @@ impl ResultsState {
                             };
                             ui.columns(2, |cols| {
                                 cols[0].vertical(|ui| {
-                                    self.preview_card(ui, cx, &item, "This file", show_pictures, 132.0);
+                                    self.preview_card(ui, cx, &item, "This file", show_pictures, 132.0, 512);
                                 });
                                 cols[1].vertical(|ui| {
-                                    self.preview_card(ui, cx, &other, title, show_pictures, 132.0);
+                                    self.preview_card(ui, cx, &other, title, show_pictures, 132.0, 512);
                                 });
                             });
                             ui.add_space(6.0);
@@ -1645,6 +1809,21 @@ impl ResultsState {
                                     events.push(Event::KeepOnly(g, k));
                                 }
                             });
+                            ui.horizontal(|ui| {
+                                if show_pictures
+                                    && widgets::ghost_button(ui, &Icon::COMPARE.with("Enlarge"))
+                                        .on_hover_text("Compare the two pictures in a large window")
+                                        .clicked()
+                                {
+                                    events.push(Event::Enlarge);
+                                }
+                                if widgets::ghost_button(ui, "Not a match")
+                                    .on_hover_text(HIDE_HINT)
+                                    .clicked()
+                                {
+                                    events.push(Event::IgnoreGroup(g));
+                                }
+                            });
                             if group_items.len() > 2 {
                                 ui.label(
                                     RichText::new(format!(
@@ -1656,7 +1835,7 @@ impl ResultsState {
                                 );
                             }
                         } else {
-                            self.preview_card(ui, cx, &item, "This file", is_pic && show_pictures, 190.0);
+                            self.preview_card(ui, cx, &item, "This file", is_pic && show_pictures, 190.0, 512);
                         }
                         if comparing {
                             // The two pictures were compared above.
@@ -1729,6 +1908,103 @@ impl ResultsState {
         }
     }
 
+    /// Two pictures side by side at a size where differences can be seen.
+    /// Up and Down move through the list while it is open.
+    fn compare_window(
+        &mut self,
+        ctx: &egui::Context,
+        cx: &ResultsCtx<'_>,
+        events: &mut Vec<Event>,
+    ) {
+        let pair = self.focus.and_then(|(g, i)| {
+            let k = self.partner_of(g, i)?;
+            let items = &self.result.groups.get(g)?.items;
+            let (item, other) = (items.get(i)?.clone(), items.get(k)?.clone());
+            images::is_picture(&item.file.path).then_some((g, i, k, item, other))
+        });
+        let Some((g, i, k, item, other)) = pair else {
+            self.big_compare = false;
+            return;
+        };
+        let p = super::theme::pal_ctx(ctx);
+        let screen = ctx.screen_rect();
+        let width = (screen.width() - 140.0).clamp(560.0, 1500.0);
+        let pic_h = (screen.height() - 330.0).clamp(180.0, 900.0);
+        let group_len = self.result.groups[g].items.len();
+        let mut close = false;
+        let modal = egui::Modal::new(egui::Id::new("compare-large"))
+            .frame(widgets::modal_frame(ctx))
+            .show(ctx, |ui| {
+                ui.set_width(width);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Compare").font(semibold(19.0)));
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(if group_len > 2 {
+                            format!(
+                                "This group has {group_len} pictures  ·  Up and Down show the next file"
+                            )
+                        } else {
+                            "Up and Down show the next file".to_string()
+                        })
+                        .size(12.5)
+                        .color(p.faint),
+                    );
+                });
+                ui.add_space(4.0);
+                let title = if other.reference {
+                    "Reference copy"
+                } else if other.selected {
+                    "Another copy"
+                } else {
+                    "The copy that stays"
+                };
+                ui.columns(2, |cols| {
+                    cols[0].vertical(|ui| {
+                        self.preview_card(ui, cx, &item, "This file", true, pic_h, 1280);
+                    });
+                    cols[1].vertical(|ui| {
+                        self.preview_card(ui, cx, &other, title, true, pic_h, 1280);
+                    });
+                });
+                ui.add_space(4.0);
+                ui.horizontal_top(|ui| {
+                    ui.label(
+                        RichText::new(Icon::COMPARE.glyph())
+                            .size(13.0)
+                            .color(p.accent),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(images::difference_hint(&item, &other)).color(p.text),
+                        )
+                        .wrap(),
+                    );
+                });
+                ui.add_space(8.0);
+                widgets::right_row(ui, 36.0, |ui| {
+                    if widgets::primary_button(ui, "Close", true).clicked() {
+                        close = true;
+                    }
+                    if !other.reference && widgets::ghost_button(ui, "Keep the other").clicked() {
+                        events.push(Event::KeepOnly(g, k));
+                    }
+                    if !item.reference && widgets::ghost_button(ui, "Keep this one").clicked() {
+                        events.push(Event::KeepOnly(g, i));
+                    }
+                    if widgets::ghost_button(ui, "Not a match")
+                        .on_hover_text(HIDE_HINT)
+                        .clicked()
+                    {
+                        events.push(Event::IgnoreGroup(g));
+                    }
+                });
+            });
+        if close || modal.should_close() {
+            self.big_compare = false;
+        }
+    }
+
     /// One file in the preview panel: picture (if any), name, folder, facts.
     #[allow(clippy::too_many_arguments)]
     fn preview_card(
@@ -1739,8 +2015,11 @@ impl ResultsState {
         title: &str,
         picture: bool,
         max_h: f32,
+        side: u32,
     ) {
         let p = pal(ui);
+        // The large compare window gives both pictures a box of the same height.
+        let boxed = side > 512;
         ui.label(RichText::new(title).font(semibold(12.0)).color(p.muted));
         if picture {
             let width = ui.available_width();
@@ -1754,11 +2033,18 @@ impl ResultsState {
             };
             let scale = (width / w).min(max_h / h);
             let size = vec2((w * scale).round(), (h * scale).round());
-            let (rect, _) = ui.allocate_exact_size(vec2(width, size.y), Sense::hover());
+            let box_h = if boxed { max_h } else { size.y };
+            let (rect, _) = ui.allocate_exact_size(vec2(width, box_h), Sense::hover());
             let frame = Rect::from_center_size(rect.center(), size);
             ui.painter().rect_filled(rect, CornerRadius::same(8), p.bg);
-            let loading = self.thumbs.loading(&item.file.path, 512);
-            match self.thumbs.get(ui.ctx(), &item.file.path, 512, cx.demo) {
+            // Until the large picture is decoded, the small one stands in.
+            let large_ready = self
+                .thumbs
+                .get(ui.ctx(), &item.file.path, side, cx.demo)
+                .is_some();
+            let side = if large_ready { side } else { 512 };
+            let loading = self.thumbs.loading(&item.file.path, side);
+            match self.thumbs.get(ui.ctx(), &item.file.path, side, cx.demo) {
                 Some(tex) => {
                     ui.painter().image(
                         tex.id(),
@@ -1778,18 +2064,9 @@ impl ResultsState {
                 }
             }
         }
-        ui.add(
-            egui::Label::new(RichText::new(file_name(&item.file.path)).font(semibold(14.0))).wrap(),
-        );
+        widgets::path_label(ui, &file_name(&item.file.path), 14.0, true, p.text);
         ui.add_space(-4.0);
-        ui.add(
-            egui::Label::new(
-                RichText::new(parent_text(&item.file.path))
-                    .size(12.5)
-                    .color(p.muted),
-            )
-            .wrap(),
-        );
+        widgets::path_label(ui, &parent_text(&item.file.path), 12.5, false, p.muted);
         let mut facts: Vec<String> = Vec::new();
         match &item.detail {
             Detail::Image { width, height, .. } => {
@@ -1842,6 +2119,9 @@ impl ResultsState {
     }
 }
 
+/// Shown wherever a group can be hidden.
+const HIDE_HINT: &str = "Use this when these files are not copies of each other, or when you want to keep them all. The group leaves the list and stays hidden in later scans. Nothing is deleted; Settings can bring hidden groups back.";
+
 /// Paints a texture so that it covers `rect` (cropping the overflow), with rounded corners.
 fn paint_cover(ui: &Ui, rect: Rect, tex: &TextureHandle, radius: u8) {
     let [w, h] = tex.size();
@@ -1871,7 +2151,8 @@ fn type_tile(p: &Palette, item: &Item) -> (Icon, Color32) {
     }
     match extension(&item.file.path).as_str() {
         "jpg" | "jpeg" | "jpe" | "jfif" | "png" | "gif" | "bmp" | "webp" | "tif" | "tiff"
-        | "cr3" | "psb" => (Icon::PICTURE, p.info),
+        | "heic" | "heif" | "hif" | "avif" | "jxl" | "dng" | "cr2" | "nef" | "arw" | "orf"
+        | "rw2" | "raf" | "pef" | "srw" | "nrw" | "cr3" | "psb" => (Icon::PICTURE, p.info),
         "mp3" | "flac" | "m4a" | "m4b" | "aac" | "ogg" | "oga" | "opus" | "wav" | "wma"
         | "aiff" | "aif" | "ape" | "wv" | "m3u" => {
             (Icon::MUSIC, Color32::from_rgb(0xb0, 0x7c, 0xf0))
@@ -2124,5 +2405,54 @@ mod tests {
         assert_eq!(state.result.groups[1].selected_count(), 2);
         assert!(select::is_valid(&state.result.groups));
         assert_eq!(detail_lines(&state.result.groups[0].items[0]).0, "");
+    }
+
+    #[test]
+    fn groups_can_be_hidden_and_folders_kept() {
+        let mut state = ResultsState::new(sample());
+        let groups = state.result.groups.len();
+        let hidden: Vec<PathBuf> = state.result.groups[0]
+            .items
+            .iter()
+            .map(|i| i.file.path.clone())
+            .collect();
+        state.apply_event(Event::IgnoreGroup(0));
+        assert_eq!(state.result.groups.len(), groups - 1);
+        assert_eq!(state.pending, Some(ResultsRequest::Ignore(hidden.clone())));
+        assert!(state
+            .result
+            .groups
+            .iter()
+            .flat_map(|g| g.items.iter())
+            .all(|i| !hidden.contains(&i.file.path)));
+        state.apply_event(Event::IgnoreGroup(99)); // out of range: ignored
+
+        let mut state = ResultsState::new(sample());
+        state.apply_event(Event::SelectGroup(1));
+        assert_eq!(
+            state.result.groups[1].selected_count(),
+            state.result.groups[1].items.len() - 1
+        );
+        state.apply_event(Event::ClearGroup(1));
+        assert_eq!(state.result.selected_count(), 0);
+        state.apply_event(Event::KeepInFolder(PathBuf::from("X:\\a")));
+        assert!(select::is_valid(&state.result.groups));
+        for group in &state.result.groups {
+            let inside = |i: &Item| within(&i.file.path, Path::new("X:\\a"));
+            if group.items.iter().any(inside) && !group.items.iter().all(inside) {
+                assert!(group.items.iter().all(|i| i.selected != inside(i)));
+            }
+        }
+        assert!(state.note.is_some());
+
+        // The large compare window only opens on a pair of pictures.
+        let mut pictures = ResultsState::new(demo::result(Finder::SimilarImages));
+        pictures.pose("compare-large");
+        assert!(pictures.overlay_open());
+        let (g, i) = pictures.focus.unwrap();
+        assert!(pictures.partner_of(g, i).is_some());
+        let mut flat = ResultsState::new(demo::result(Finder::BigFiles));
+        flat.apply_event(Event::IgnoreGroup(0));
+        assert!(flat.pending.is_none(), "flat lists have no groups to hide");
     }
 }

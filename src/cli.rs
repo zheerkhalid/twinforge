@@ -25,7 +25,7 @@ pub const USAGE: &str = "TwinForge: finds duplicate files, similar pictures and 
         --verify                     also compare duplicates byte by byte
         --keep <rule>                mark what a rule would remove: newest, oldest, largest,
                                      smallest, best-resolution, best-audio, shortest-path,
-                                     longest-path
+                                     longest-path, original-name
         --no-cache  --no-recursive  --include-hidden  --include-system  --list
   TwinForge.exe --demo               show invented data; nothing on this PC is changed
   TwinForge.exe --screenshot <png>   render the window to a PNG and exit
@@ -58,6 +58,7 @@ fn rule_from(word: &str) -> Option<Rule> {
         "best-audio" => Rule::KeepBestAudio,
         "shortest-path" => Rule::KeepShortestPath,
         "longest-path" => Rule::KeepLongestPath,
+        "original-name" => Rule::KeepOriginalName,
         _ => return None,
     })
 }

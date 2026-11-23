@@ -2,7 +2,11 @@
 ; Setup and the uninstaller never touch the files TwinForge was used on.
 
 #ifndef AppVersion
-  #define AppVersion "1.0.0"
+  #define AppVersion "1.1.0"
+#endif
+; Where cargo put the build (scripts\package.ps1 passes CARGO_TARGET_DIR).
+#ifndef TargetDir
+  #define TargetDir "..\target"
 #endif
 
 [Setup]
@@ -22,7 +26,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\dist
 OutputBaseFilename=TwinForge-Setup
-SetupIconFile=..\target\twinforge.ico
+SetupIconFile={#TargetDir}\twinforge.ico
 UninstallDisplayIcon={app}\TwinForge.exe
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -39,7 +43,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "foldermenu"; Description: "Add ""Find duplicates with TwinForge"" to the right-click menu of folders"; GroupDescription: "Explorer:"; Flags: unchecked
 
 [Files]
-Source: "..\target\release\TwinForge.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#TargetDir}\release\TwinForge.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 Source: "..\NOTICE"; DestDir: "{app}"; DestName: "NOTICE.txt"; Flags: ignoreversion
 

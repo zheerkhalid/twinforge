@@ -8,12 +8,13 @@
 
 A duplicate finder for Windows, written in **Rust**.
 Exact duplicates, similar pictures, similar music and six clean-up finders, with keep-rules that never let you delete the last copy.
+Kurdish, Arabic, Persian and Hebrew file names are shown the way File Explorer shows them.
 
 <p>
   <img alt="Platform" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?style=for-the-badge&logo=windows11&logoColor=white" />
   <img alt="Rust" src="https://img.shields.io/badge/Rust-stable-B7410E?style=for-the-badge&logo=rust&logoColor=white" />
   <img alt="License" src="https://img.shields.io/badge/License-MIT-FF8A1F?style=for-the-badge" />
-  <img alt="EXE size" src="https://img.shields.io/badge/EXE-7.0%20MB-F0502D?style=for-the-badge" />
+  <img alt="EXE size" src="https://img.shields.io/badge/EXE-7.1%20MB-F0502D?style=for-the-badge" />
 </p>
 
 <p>
@@ -22,7 +23,7 @@ Exact duplicates, similar pictures, similar music and six clean-up finders, with
   <img alt="Recycle Bin" src="https://img.shields.io/badge/deletes%20to-Recycle%20Bin-10C98F?style=flat-square" />
   <img alt="Setup and portable" src="https://img.shields.io/badge/setup%20%2B%20portable-no%20runtimes-10C98F?style=flat-square" />
   <img alt="No telemetry" src="https://img.shields.io/badge/telemetry-none-10C98F?style=flat-square" />
-  <img alt="Tests" src="https://img.shields.io/badge/tests-118%20passing-10C98F?style=flat-square" />
+  <img alt="Tests" src="https://img.shields.io/badge/tests-134%20passing-10C98F?style=flat-square" />
   <img alt="Made by Zheer Khalid" src="https://img.shields.io/badge/made%20by-Zheer%20Khalid-FF5A4E?style=flat-square" />
 </p>
 
@@ -31,6 +32,7 @@ Exact duplicates, similar pictures, similar music and six clean-up finders, with
 [**Download**](#-download) ·
 [**Safety**](#%EF%B8%8F-safety) ·
 [**Limits**](#-good-to-know) ·
+[**Changelog**](CHANGELOG.md) ·
 [**Developer**](#-developer)
 
 <img src="docs/screenshots/duplicates.png" alt="TwinForge duplicate files" width="900" />
@@ -57,9 +59,11 @@ Exact duplicates, similar pictures, similar music and six clean-up finders, with
 
 ### 🖼️ Similar pictures
 - Finds resized, recompressed, rotated and mirrored copies
+- Reads JPEG, PNG, GIF, BMP, WebP and TIFF, plus HEIC, AVIF, JPEG XL and camera RAW through the Windows codecs
 - Similarity slider
-- Side-by-side compare with resolution, size, date and a difference hint
+- Side-by-side compare with resolution, size, date and a difference hint, and a large compare window
 - "Keep this one / keep the other" in one click
+- **Not a match:** hide a group for good; it stays hidden in later scans
 
 </td>
 </tr>
@@ -67,7 +71,7 @@ Exact duplicates, similar pictures, similar music and six clean-up finders, with
 <td valign="top">
 
 ### 🎵 Similar music and clean-up
-- Similar music by artist, title, album and length, with fuzzy matching
+- Similar music by artist, title, album and length, with fuzzy matching (also for Kurdish, Arabic and Persian tags)
 - Same name in different folders
 - Empty files and empty folders
 - Broken shortcuts
@@ -78,6 +82,8 @@ Exact duplicates, similar pictures, similar music and six clean-up finders, with
 
 ### ✅ Smart selection
 - Keep newest, oldest, largest, smallest, highest resolution, best audio, shortest or longest path, or by folder order
+- **Keep the original name:** `photo (1).jpg` and `report - Copy.docx` go, the plain name stays
+- **Keep the copies in this folder**, for every group at once
 - **Reference folders:** files there are never selected
 - Invert, select by folder, filter and search results
 - Running total of files and space selected
@@ -102,6 +108,7 @@ Exact duplicates, similar pictures, similar music and six clean-up finders, with
 - `TwinForge.exe --scan <folders> --export out.csv`
 - Filters by size, type, date and name
 - Hidden and system files skipped by default
+- Drop folders on the window to add them
 
 </td>
 </tr>
@@ -113,6 +120,10 @@ Exact duplicates, similar pictures, similar music and six clean-up finders, with
 <tr>
 <td width="50%" align="center"><b>Choose what to scan</b><br><img src="docs/screenshots/scan-setup.png" alt="Scan setup" /></td>
 <td width="50%" align="center"><b>Similar pictures, side by side</b><br><img src="docs/screenshots/similar-pictures.png" alt="Similar pictures" /></td>
+</tr>
+<tr>
+<td width="50%" align="center"><b>Large compare window</b><br><img src="docs/screenshots/compare-large.png" alt="Large compare window" /></td>
+<td width="50%" align="center"><b>Settings</b><br><img src="docs/screenshots/settings.png" alt="Settings" /></td>
 </tr>
 <tr>
 <td width="50%" align="center"><b>Similar music</b><br><img src="docs/screenshots/similar-music.png" alt="Similar music" /></td>
@@ -138,7 +149,7 @@ Get it from the [**latest release**](https://github.com/zheerkhalid/twinforge/re
 |---|---|
 | `TwinForge-Setup.exe` | Per-user installer with shortcuts and an uninstaller |
 | `TwinForge-x.y.z-portable-x64.zip` | Portable: unzip and run |
-| `TwinForge.exe` | The bare 7.0 MB EXE |
+| `TwinForge.exe` | The bare 7.1 MB EXE |
 
 ## 🛡️ Safety
 
@@ -155,7 +166,10 @@ A duplicate finder deletes files, so the engine itself refuses unsafe actions, n
 
 - Similar-picture matching can produce false matches, especially at lower similarity settings. Look at the compare view before removing.
 - Similar music compares tags only; there is no audio fingerprinting.
-- Not supported yet: similar videos, HEIC, camera RAW and AVIF pictures, and an ignore list for false matches.
+- Not supported yet: similar videos.
+- HEIC, AVIF, JPEG XL and camera RAW pictures are read with the codecs of Windows. Some need a free extension from the Microsoft Store (HEIF Image Extensions, AV1 Video Extension, Raw Image Extension); without it those files are listed as "not read". This path is tested with the codecs every Windows has; it was not tried on real HEIC or RAW files.
+- Right-to-left names are drawn on one line by Windows. Text you type into the search box, and paths inside pop-up messages, still use the plain text drawing and show such letters unjoined.
+- A hidden ("not a match") group is remembered by its file paths, so it comes back when one of its files is moved or renamed. Command line scans do not use the hidden list.
 - Replacing with symbolic links needs administrator rights or Windows Developer Mode.
 - Files are sent to the Recycle Bin one at a time, so very large selections are slow.
 
@@ -184,9 +198,13 @@ src/
   music.rs / fuzzy.rs                similar music
   finders.rs                         the clean-up finders
   select.rs                          keep-rules
+  ignore.rs                          groups marked "not a match"
+  wic.rs                             HEIC, AVIF and RAW through the Windows codecs
   actions.rs                         delete, move, link, with the safety checks
-  ui/                                the egui interface
+  ui/                                the egui interface (ui/bidi.rs draws right-to-left names)
 ```
+
+What changed in each version is in the [changelog](CHANGELOG.md).
 
 The icon is drawn in code at build time. The C runtime is linked statically, so the EXE runs on a clean Windows install.
 
